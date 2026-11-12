@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import {
   ArrowDownRight, ArrowRight, ArrowUpRight, BookOpen, ChevronRight, Clock3,
-  FileText, LayoutDashboard, Lightbulb, Plus, Search, Send, Sparkles, X,
+  FileText, LayoutDashboard, Lightbulb, Plus, Search, Send, Sparkles, UserRound, X,
 } from 'lucide-react'
 import './styles.css'
 
@@ -11,6 +11,7 @@ const pages = [
   ['notes', 'My Notes', FileText],
   ['chat', 'AI Chat', Sparkles],
   ['recommendations', 'Recommendations', Lightbulb],
+  ['users', 'Users', UserRound],
 ]
 const prompts = ['Explain Kubernetes pods simply.', 'What is Docker?', 'Explain machine learning with an example.']
 const blank = { title: '', subject: '', content: '' }
@@ -21,12 +22,21 @@ function stored(key) {
 }
 
 async function api(path, { method = 'GET', body, signal } = {}) {
+  const headers = {}
+  const token = sessionStorage.getItem('studybuddy-token')
+  if (body) headers['Content-Type'] = 'application/json'
+  if (token) headers.Authorization = 'Bearer ' + token
   const response = await fetch('/api' + path, {
     method, signal,
-    ...(body && { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+    headers,
+    ...(body && { body: JSON.stringify(body) }),
   })
   if (response.status === 204) return
   const data = await response.json()
+  if (response.status === 401 && token) {
+    sessionStorage.removeItem('studybuddy-token')
+    window.dispatchEvent(new Event('studybuddy:auth-expired'))
+  }
   if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Check your input and try again.')
   return data
 }
@@ -98,8 +108,21 @@ function NoteDialog({ note, onClose, onChange }) {
 
 function App() {
   const [page, setPage] = useState(getPage)
+  const [authReady, setAuthReady] = useState(false)
+  const [authStatus, setAuthStatus] = useState(null)
+  const [currentUser, setCurrentUser] = useState(null)
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const [authError, setAuthError] = useState('')
+  const [signingIn, setSigningIn] = useState(false)
+  const [users, setUsers] = useState([])
+  const [newUsername, setNewUsername] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [usersError, setUsersError] = useState('')
+  const [usersBusy, setUsersBusy] = useState(false)
+  const [usersLoading, setUsersLoading] = useState(false)
   const [notes, setNotes] = useState([])
-  const [recent, setRecent] = useState(() => stored('studybuddy-recent'))
+  const [recent, setRecent] = useState([])
   const [query, setQuery] = useState('')
   const [subject, setSubject] = useState('')
   const [results, setResults] = useState([])
@@ -121,21 +144,57 @@ function App() {
   const activeQuery = query.trim()
 
   useEffect(() => {
+    let active = true
+    const token = sessionStorage.getItem('studybuddy-token')
+    Promise.all([
+      api('/auth/status').catch(error => { throw error }),
+      token ? api('/auth/me').catch(() => null) : Promise.resolve(null),
+    ]).then(([status, user]) => {
+      if (!active) return
+      setAuthStatus(status)
+      setCurrentUser(user)
+      if (!user) sessionStorage.removeItem('studybuddy-token')
+    }).catch(error => {
+      if (active) setAuthError(error.message)
+    }).finally(() => {
+      if (active) setAuthReady(true)
+    })
+    const expired = () => {
+      sessionStorage.removeItem('studybuddy-token')
+      setCurrentUser(null)
+      setNotes([])
+      setRecent([])
+      setEditor(null)
+      setAuthError('Your session expired. Sign in again.')
+    }
+    window.addEventListener('studybuddy:auth-expired', expired)
+    return () => {
+      active = false
+      window.removeEventListener('studybuddy:auth-expired', expired)
+    }
+  }, [])
+
+  useEffect(() => {
+    setRecent(currentUser ? stored('studybuddy-recent:' + currentUser.id) : [])
+  }, [currentUser])
+
+  useEffect(() => {
     const change = () => setPage(getPage())
     window.addEventListener('hashchange', change)
     return () => window.removeEventListener('hashchange', change)
   }, [])
 
   useEffect(() => {
+    if (!currentUser) { setLoading(false); return }
     const controller = new AbortController()
     api('/notes', { signal: controller.signal })
       .then(data => { setNotes(data); setError(''); setLoading(false) })
       .catch(err => { if (!controller.signal.aborted) { setError(err.message); setLoading(false) } })
     return () => controller.abort()
-  }, [version])
+  }, [version, currentUser])
 
   useEffect(() => {
-    if (!activeQuery) return
+    if (!activeQuery || !currentUser) return
     const controller = new AbortController()
     const timer = setTimeout(() => {
       api('/search?' + new URLSearchParams({ q: activeQuery }), { signal: controller.signal })
@@ -143,10 +202,10 @@ function App() {
         .catch(err => { if (!controller.signal.aborted) { setSearchError(err.message); setSearching(false) } })
     }, 140)
     return () => { clearTimeout(timer); controller.abort() }
-  }, [activeQuery, version])
+  }, [activeQuery, version, currentUser])
 
   useEffect(() => {
-    if (page !== 'recommendations') return
+    if (page !== 'recommendations' || !currentUser) return
     const controller = new AbortController()
     const params = new URLSearchParams()
     recent.forEach(item => params.append('subject', item.subject))
@@ -156,18 +215,39 @@ function App() {
       .then(data => { setSuggestions(data); setLoadingSuggestions(false) })
       .catch(err => { if (!controller.signal.aborted) { setSuggestionError(err.message); setLoadingSuggestions(false) } })
     return () => controller.abort()
-  }, [page, recent])
+  }, [page, recent, currentUser])
 
   useEffect(() => {
-    if (page === 'chat') api('/chat/status').then(data => setConfigured(data.configured)).catch(() => {})
-  }, [page])
+    if (page === 'chat' && currentUser) api('/chat/status').then(data => setConfigured(data.configured)).catch(() => {})
+  }, [page, currentUser])
+
+  useEffect(() => {
+    if (page !== 'users' || currentUser?.role !== 'admin') return
+    const controller = new AbortController()
+    setUsersLoading(true)
+    api('/auth/users', { signal: controller.signal })
+      .then(data => { setUsers(data); setUsersError(''); setUsersLoading(false) })
+      .catch(err => {
+        if (!controller.signal.aborted) {
+          setUsersError(err.message)
+          setUsersLoading(false)
+        }
+      })
+    return () => controller.abort()
+  }, [page, currentUser])
+
+  useEffect(() => {
+    if (page === 'users' && currentUser && currentUser.role !== 'admin') location.hash = 'dashboard'
+  }, [page, currentUser])
 
   useEffect(() => {
     if (chatLog.current) chatLog.current.scrollTop = chatLog.current.scrollHeight
   }, [messages, sending, page])
 
   function updateRecent(items) {
-    try { localStorage.setItem('studybuddy-recent', JSON.stringify(items)) } catch { /* Storage may be disabled. */ }
+    try {
+      if (currentUser) localStorage.setItem('studybuddy-recent:' + currentUser.id, JSON.stringify(items))
+    } catch { /* Storage may be disabled. */ }
     setRecent(items)
   }
 
@@ -225,20 +305,95 @@ function App() {
     }
   }
 
+  async function signIn(event) {
+    event.preventDefault()
+    setSigningIn(true)
+    setAuthError('')
+    try {
+      const result = await api('/auth/login', { method: 'POST', body: { username, password } })
+      sessionStorage.setItem('studybuddy-token', result.token)
+      setCurrentUser(result.user)
+      setPassword('')
+    } catch (err) {
+      setAuthError(err.message)
+    } finally {
+      setSigningIn(false)
+    }
+  }
+
+  async function addUser(event) {
+    event.preventDefault()
+    setUsersBusy(true)
+    setUsersError('')
+    try {
+      const created = await api('/auth/users', {
+        method: 'POST',
+        body: { username: newUsername, password: newPassword },
+      })
+      setUsers(items => [...items, created].sort((a, b) => a.username.localeCompare(b.username)))
+      setNewUsername('')
+      setNewPassword('')
+    } catch (err) {
+      setUsersError(err.message)
+    } finally {
+      setUsersBusy(false)
+    }
+  }
+
+  function signOut() {
+    sessionStorage.removeItem('studybuddy-token')
+    setCurrentUser(null)
+    setMessages([])
+    setNotes([])
+    setRecent([])
+    setEditor(null)
+    setSuggestions([])
+    setQuery('')
+  }
+
   const visible = (activeQuery ? results : notes).filter(note => !subject || note.subject === subject)
   const viewedNotes = recent.map(item => notes.find(note => note.id === item.id)).filter(Boolean).slice(0, 3)
   const title = pages.find(([key]) => key === page)[1]
+
+  if (!authReady) return <main className="login-shell"><p role="status">Connecting to StudyBuddy…</p></main>
+  if (!currentUser) return <main className="login-shell">
+    <section className="login-card">
+      <a className="brand login-brand" href="#dashboard"><span><BookOpen size={20} /></span>StudyBuddy <small>AI</small></a>
+      <h1>Welcome back</h1>
+      <p className="login-copy">Sign in to your private study workspace.</p>
+      {authStatus && !authStatus.configured && <p className="setup-message" role="status">
+        {authStatus.bootstrap_required
+          ? 'No accounts exist yet. Configure AUTH_ADMIN_USERNAME and AUTH_ADMIN_PASSWORD (at least 12 characters) for the auth service, then restart it.'
+          : 'Authentication is not configured. Set AUTH_TOKEN_SECRET to a private value of at least 32 characters and configure an admin account on the backend.'}
+      </p>}
+      {authError && <p role="alert" className="error">{authError}</p>}
+      <form className="grid gap-4" onSubmit={signIn}>
+        <label className="grid gap-2">Username
+          <input required autoComplete="username" value={username} onChange={event => setUsername(event.target.value)} />
+        </label>
+        <label className="grid gap-2">Password
+          <input required type="password" autoComplete="current-password" value={password} onChange={event => setPassword(event.target.value)} />
+        </label>
+        <button className="primary" disabled={signingIn || authStatus?.configured === false}>
+          {signingIn ? 'Signing in…' : 'Sign in'}
+        </button>
+      </form>
+    </section>
+  </main>
 
   return <div className="app-shell">
     <aside className="sidebar">
       <a className="brand" href="#dashboard"><span><BookOpen size={20} /></span>StudyBuddy <small>AI</small></a>
       <nav aria-label="Main navigation">
-        {pages.map(([key, label, Icon]) => <a key={key} href={'#' + key} aria-current={key === page ? 'page' : undefined}
+        {pages.filter(([key]) => key !== 'users' || currentUser.role === 'admin').map(([key, label, Icon]) => <a key={key} href={'#' + key} aria-current={key === page ? 'page' : undefined}
           onClick={() => { if (key === 'notes') { changeSearch(''); setSubject('') } }}>
           <Icon size={18} />{label}
         </a>)}
       </nav>
-      <div className="sidebar-bottom"><BookOpen size={16} /> Study workspace</div>
+      <div className="sidebar-bottom account-info">
+        <BookOpen size={16} /><span>{currentUser.username}</span>
+        <button className="text-button" onClick={signOut}>Sign out</button>
+      </div>
     </aside>
 
     <div className="main-shell">
@@ -334,6 +489,29 @@ function App() {
             </article>)}</div> : <div className="empty">Open a note about Python, Docker, Kubernetes, or AI to get suggestions.
               <button className="text-button mt-3" onClick={() => showNotes()}>Browse notes <ArrowRight size={16} /></button>
             </div>}
+        </>}
+
+        {page === 'users' && currentUser.role === 'admin' && <>
+          <div className="page-heading"><div><h1>Users</h1><p>Create accounts for your study group. Public signup is disabled.</p></div></div>
+          <section className="user-management">
+            <h2>Create a student account</h2>
+            <form className="user-form" onSubmit={addUser}>
+              <label>Username
+                <input required minLength={3} maxLength={80} autoComplete="off" value={newUsername}
+                  onChange={event => setNewUsername(event.target.value)} />
+              </label>
+              <label>Temporary password
+                <input required minLength={12} maxLength={200} type="password" autoComplete="new-password"
+                  value={newPassword} onChange={event => setNewPassword(event.target.value)} />
+              </label>
+              <button className="primary" disabled={usersBusy}>{usersBusy ? 'Creating…' : 'Create account'}</button>
+            </form>
+            {usersError && <p role="alert" className="error">{usersError}</p>}
+            <h2 className="user-list-title">Accounts</h2>
+            {usersLoading ? <p role="status">Loading accounts…</p> : users.length ? <div className="recent-list">{users.map(user => <div className="user-row" key={user.id}>
+              <span>{user.username}</span><small>{user.role}</small>
+            </div>)}</div> : <p className="empty">No accounts found.</p>}
+          </section>
         </>}
       </main>
     </div>

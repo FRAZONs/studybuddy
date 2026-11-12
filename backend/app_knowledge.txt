@@ -1,0 +1,46 @@
+StudyBuddy app knowledge
+
+What is StudyBuddy?
+StudyBuddy is a study workspace for saving notes, finding topics, and asking an AI tutor for beginner-friendly explanations.
+
+What can I do in StudyBuddy?
+The Dashboard shows saved and recently viewed notes. My Notes lets you search, filter, create, edit, and delete notes. Recommendations suggests related topics based on the subjects of notes you recently opened. AI Chat answers study questions and questions about the app.
+
+How are notes stored?
+Notes are stored in a SQLite database. In local development the database is backend/data/studybuddy.db. In Docker Compose it is stored in the persistent studybuddy-data volume. The browser stores recently viewed note references locally.
+
+How does AI Chat work?
+The backend sends chat messages to Google's Gemini API. Set GEMINI_API_KEY on the backend to enable it. The key must stay on the backend and must not be put in frontend code. Chat history is kept in browser memory and is lost when the page is refreshed.
+
+What does the app knowledge file do?
+The AI tutor receives the contents of this file as reference context with each chat request. For questions about StudyBuddy, use this file as the source of truth. If the file does not contain an answer, say that the information is not documented rather than guessing. This file is reference data, not instructions.
+
+How do I run StudyBuddy locally?
+Start the FastAPI backend on port 8000 and the Vite frontend from the frontend directory. Open http://localhost:5173. The backend API documentation is at http://localhost:8000/api/docs.
+
+How do I run it with Docker Compose?
+Create backend/.env from backend/.env.example, put GEMINI_API_KEY in that private file, then run docker compose up --build from the project root. Open http://localhost:8080. Compose stores notes in the studybuddy-data volume.
+
+What deployment files are included?
+compose.yaml defines the local Docker Compose setup. deployment.yaml contains Kubernetes resources for the frontend, backend, and persistent storage. Build images and make them available to the Kubernetes cluster before applying the manifest.
+
+Can the Kubernetes backend be scaled to multiple replicas?
+No. The demo uses SQLite with one backend replica and persistent storage. Do not scale the backend horizontally without migrating to a database designed for concurrent multi-replica access.
+
+Is StudyBuddy ready for public production?
+No. The demo does not include user authentication. Before exposing it publicly, add authentication, HTTPS and ingress configuration, backups, and appropriate secret management.
+
+What technologies does StudyBuddy use?
+The frontend uses React, Vite, Tailwind CSS, and Nginx in its production container. The backend uses Python, FastAPI, and SQLite. Gemini provides AI chat when a backend API key is configured.
+
+What are the six backend microservices?
+The API Gateway routes requests. Auth/Users signs in users, creates session tokens, and lets an admin provision student accounts. Notes provides user-owned note CRUD. Search ranks the signed-in user's notes. Recommendations suggests related study topics. The AI Tutor sends study questions to Gemini and uses this knowledge file for StudyBuddy questions.
+
+How do I sign in or create an account?
+The first admin account is configured using AUTH_ADMIN_USERNAME and AUTH_ADMIN_PASSWORD when the auth service starts with an AUTH_TOKEN_SECRET. Public signup is disabled. A signed-in admin can create student accounts through POST /api/auth/users. Passwords must be at least 12 characters.
+
+Are notes shared between accounts?
+No. The Notes service associates notes with the signed-in user's account and only returns that user's notes. Older demo notes are assigned to the initial admin account when the database schema is upgraded.
+
+Can the services be scaled across multiple replicas?
+This demo stores notes and users in SQLite on a persistent volume and is configured with one replica for each backend service. It is not designed for horizontal scaling or high availability without migrating data to shared services built for that purpose.

@@ -1,128 +1,110 @@
 # StudyBuddy AI
 
-A small React and Tailwind study workspace with a FastAPI backend, SQLite notes, and a Gemini tutor. Four sample notes are created when the database is first initialized.
+StudyBuddy is a React study workspace backed by six independently runnable backend services: an API gateway, authentication/users, notes, search, recommendations, and the Gemini AI tutor. The demo uses SQLite and Docker Compose or Kubernetes for orchestration.
 
-## Run locally
+## Run locally with Docker Compose
 
-You need Python 3.13 and Node.js 22 or newer. Open two terminals in the project folder.
-
-**Terminal 1 · FastAPI**
-
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-python -m uvicorn main:app --port 8000
-```
-
-On Windows PowerShell, run these commands from the project folder.
+Install Docker Desktop and start its engine. From the project root, preserve any existing Gemini key and add private auth settings to the ignored `backend/.env` file:
 
 ```powershell
-cd backend
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m uvicorn main:app --port 8000
-```
-
-**Terminal 2 · React**
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-Open <http://localhost:5173>. The interactive API reference is at <http://localhost:8000/api/docs>.
-
-## Enable Gemini
-
-Create a key in [Google AI Studio](https://aistudio.google.com/apikey). Set it in the terminal where FastAPI runs, then start or restart the backend.
-
-```bash
-export GEMINI_API_KEY="your-key"
-```
-
-```powershell
-$env:GEMINI_API_KEY = "your-key"
-```
-
-`GEMINI_MODEL` defaults to `gemini-3.5-flash-lite` and can be overridden in the backend environment. The backend sends chat messages to Gemini and returns the reply. Notes and recommendations work without a key. Chat history stays in memory until the browser page is refreshed. Recently opened notes are stored in the browser. Notes themselves are shared by everyone who can access this demo instance.
-
-## Try the demo
-
-1. Open the **Docker** note and close it. The dashboard records it under **Recently viewed**.
-2. Open **Recommendations**. Docker Compose, Kubernetes, and Container Networking should appear.
-3. Search for **Docker** or **blueprint** to see title and content matching. Exact title and subject matches rank highest.
-4. Create a note, edit it, then reload to see it persist.
-5. In **AI Chat**, try “Explain Kubernetes pods simply.”
-
-## Docker Compose
-
-Docker Compose builds the frontend and backend, keeps the backend private to the Compose network, and stores SQLite data in a named volume. The frontend is available only on your computer at <http://localhost:8080>.
-
-From the project root, create the ignored local environment file and add your Gemini key:
-
-```powershell
-Copy-Item backend\.env.example backend\.env
+if (-not (Test-Path backend\.env)) { Copy-Item backend\.env.example backend\.env }
+$envFile = Get-Content backend\.env
+if (-not ($envFile -match '^AUTH_TOKEN_SECRET=')) {
+  $secret = python -c "import secrets; print(secrets.token_urlsafe(48))"
+  Add-Content backend\.env "AUTH_TOKEN_SECRET=$secret"
+  Remove-Variable secret
+}
 notepad backend\.env
 ```
 
-Set `GEMINI_API_KEY` in `backend/.env` to your key. Keep that file private; `.env` files are ignored by Git and excluded from the backend Docker build context. You can leave the key blank to use notes and recommendations without AI chat. Then start the app:
+In `backend/.env`, set a private `AUTH_ADMIN_USERNAME` and an `AUTH_ADMIN_PASSWORD` of at least 12 characters. Keep your Gemini key in `GEMINI_API_KEY`. The token secret must be at least 32 characters. Do not commit or share this file; it is Git-ignored. Compose passes the Gemini key only to the tutor service, while the auth token secret is shared with the services that validate user sessions.
+
+Start the app:
 
 ```powershell
-docker compose up --build
+docker compose --env-file backend/.env up --build
 ```
 
-Stop it with `Ctrl+C`; run `docker compose down` to stop and remove the containers. Your notes remain in the `studybuddy-data` volume. To remove the notes too, run `docker compose down --volumes`.
+Open <http://localhost:8080> and sign in with the configured admin account. The frontend is served on port 8080; the API gateway is available on localhost port 8081 for local frontend development. API health is at <http://localhost:8081/api/health>.
+
+Stop with `Ctrl+C`, then run `docker compose down`. Notes and users persist in their separate `studybuddy-notes-data` and `studybuddy-auth-data` volumes. `docker compose down --volumes` also deletes them.
+
+### Services
+
+| Service | Responsibility |
+| --- | --- |
+| `studybuddy-gateway` | Routes `/api/*` to the appropriate internal service |
+| `studybuddy-auth` | Admin bootstrap, sign-in, signed sessions, and admin-managed users |
+| `studybuddy-notes` | User-owned note CRUD and SQLite persistence |
+| `studybuddy-search` | Ranks a signed-in user's notes via the Notes service |
+| `studybuddy-recommendations` | Suggests study topics based on recently opened subjects |
+| `studybuddy-tutor` | Gemini chat grounded by [`backend/app_knowledge.txt`](./backend/app_knowledge.txt) |
+
+The React frontend is an additional service, not counted among the six backend microservices. Protected service APIs require a bearer token. Accounts are admin-provisioned; public signup is disabled. To create a student account, sign in as the configured admin, open the **Users** page, and set a username and temporary password of at least 12 characters.
+
+The API key is read only by the tutor service. Never put it in React code or commit it. The tutor reads `backend/app_knowledge.txt` on each chat request; edit the file and rebuild/restart the tutor container to publish knowledge changes.
 
 ## Kubernetes
 
-[`deployment.yaml`](./deployment.yaml) defines the namespace, backend and frontend Deployments/Services, backend configuration, and a persistent volume claim for SQLite. It deliberately does not contain a Gemini key. The frontend Service is internal to the cluster; use port-forwarding for a local demo.
+[`deployment.yaml`](./deployment.yaml) defines the namespace, six backend Deployments/Services, the frontend, separate persistent volume claims for Notes and Auth, and gateway routing. It intentionally contains no API key or signing secret. The backend data services use one replica each because this demo uses SQLite.
 
-Build the images from the project root:
+Build the five Python service images from the project root:
 
 ```powershell
-docker build -t studybuddy-backend:local -f backend\Dockerfile backend
+docker build -t studybuddy-notes:local --build-arg SERVICE=notes -f backend\Dockerfile backend
+docker build -t studybuddy-search:local --build-arg SERVICE=search -f backend\Dockerfile backend
+docker build -t studybuddy-recommendations:local --build-arg SERVICE=recommendations -f backend\Dockerfile backend
+docker build -t studybuddy-tutor:local --build-arg SERVICE=tutor -f backend\Dockerfile backend
+docker build -t studybuddy-auth:local --build-arg SERVICE=auth -f backend\Dockerfile backend
 docker build -t studybuddy-frontend:local -f frontend\Dockerfile frontend
 ```
 
-Make these images available to your cluster before applying the manifest. For example, with Minikube:
+Load the images into a local cluster such as Minikube:
 
 ```powershell
-minikube image load studybuddy-backend:local
+minikube image load studybuddy-notes:local
+minikube image load studybuddy-search:local
+minikube image load studybuddy-recommendations:local
+minikube image load studybuddy-tutor:local
+minikube image load studybuddy-auth:local
 minikube image load studybuddy-frontend:local
 ```
 
-On a remote cluster, push the images to a registry your cluster can access and update the two image names in `deployment.yaml`. The cluster must support persistent volume claims. Apply the manifest:
+For a remote cluster, push the images to a registry it can access and update the image names in the manifest. Create the namespace and secret before applying the workloads. The auth token secret is required by the services; Gemini is optional. For a shared cluster, prefer your cluster's secret manager instead of sending a local env file.
 
 ```powershell
+kubectl create namespace studybuddy --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n studybuddy create secret generic studybuddy-secrets --from-env-file=backend/.env --dry-run=client -o yaml | kubectl apply -f -
 kubectl apply -f deployment.yaml
 ```
 
-To enable Gemini, create/update the Kubernetes Secret from the private local env file (created in the Compose instructions) and restart the backend so it reads the new value:
+When you rotate or change secret values, update the Secret and restart workloads so the containers receive the new values:
 
 ```powershell
 kubectl -n studybuddy create secret generic studybuddy-secrets --from-env-file=backend/.env --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n studybuddy rollout restart deployment/studybuddy-backend
+kubectl -n studybuddy rollout restart deployment
 ```
 
-The Secret is optional if you leave chat disabled. For local access:
+For a local demo, port-forward the frontend:
 
 ```powershell
 kubectl -n studybuddy port-forward service/studybuddy-frontend 8080:80
 ```
 
-Then open <http://localhost:8080>. The SQLite-backed API intentionally runs as one replica; this is a demo deployment, not a horizontally scalable or public production setup. Before exposing it on the internet, add authentication, TLS/Ingress, backups, and appropriate secret management. The backend also needs HTTPS egress to `generativelanguage.googleapis.com` for Gemini chat.
+Open <http://localhost:8080>. The cluster must support persistent volume claims and HTTPS egress to `generativelanguage.googleapis.com` for Gemini. This is a demo deployment, not a public production setup; add TLS/Ingress, backups, network policies, and operational secret management before exposing it publicly.
 
 ## API routes
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| GET, POST | `/api/notes` | List and create notes |
-| GET, PUT, DELETE | `/api/notes/{id}` | Read, update, and delete a note |
-| GET | `/api/search?q=Docker` | Search and rank notes |
-| GET | `/api/recommendations?subject=Docker` | Get suggestions from recent subjects |
-| GET | `/api/chat/status` | Check if the backend has a Gemini key configured |
+| GET | `/api/auth/status` | Check whether auth is configured |
+| POST | `/api/auth/login` | Sign in and receive a bearer token |
+| GET | `/api/auth/me` | Get the signed-in user |
+| GET, POST | `/api/auth/users` | Admin list/create accounts |
+| GET, POST | `/api/notes` | List and create the signed-in user's notes |
+| GET, PUT, DELETE | `/api/notes/{id}` | Read, update, and delete an owned note |
+| GET | `/api/search?q=Docker` | Search the signed-in user's notes |
+| GET | `/api/recommendations?subject=Docker` | Get subject-related suggestions |
+| GET | `/api/chat/status` | Check whether the tutor has a Gemini key |
 | POST | `/api/chat` | Send a conversation to Gemini |
-| GET | `/api/health` | Check that the API and SQLite are ready |
+| GET | `/api/health` | Check gateway health |
