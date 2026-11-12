@@ -1,0 +1,34 @@
+services:
+  studybuddy-backend:
+    build:
+      context: ./backend
+    environment:
+      DATABASE_PATH: /data/studybuddy.db
+    env_file:
+      - ./backend/.env
+    volumes:
+      - studybuddy-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      studybuddy-backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+volumes:
+  studybuddy-data:

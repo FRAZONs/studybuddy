@@ -1,0 +1,179 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: studybuddy
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: studybuddy-backend-config
+  namespace: studybuddy
+data:
+  DATABASE_PATH: /data/studybuddy.db
+  GEMINI_MODEL: gemini-3.5-flash-lite
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: studybuddy-data
+  namespace: studybuddy
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: studybuddy-backend
+  namespace: studybuddy
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: studybuddy-backend
+  template:
+    metadata:
+      labels:
+        app: studybuddy-backend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+      containers:
+        - name: backend
+          image: studybuddy-backend:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: studybuddy-backend-config
+          env:
+            - name: GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: studybuddy-secrets
+                  key: GEMINI_API_KEY
+                  optional: true
+          volumeMounts:
+            - name: studybuddy-data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+      volumes:
+        - name: studybuddy-data
+          persistentVolumeClaim:
+            claimName: studybuddy-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: studybuddy-backend
+  namespace: studybuddy
+spec:
+  selector:
+    app: studybuddy-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: studybuddy-frontend
+  namespace: studybuddy
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: studybuddy-frontend
+  template:
+    metadata:
+      labels:
+        app: studybuddy-frontend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+      containers:
+        - name: frontend
+          image: studybuddy-frontend:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - name: nginx-tmp
+              mountPath: /tmp
+      volumes:
+        - name: nginx-tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: studybuddy-frontend
+  namespace: studybuddy
+spec:
+  selector:
+    app: studybuddy-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
